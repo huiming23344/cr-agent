@@ -1,13 +1,18 @@
 import os
+import asyncio
+from typing import TypedDict
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 
-from git_tools import get_last_commit_author
+from shell_tools import shell_tool
 
-# 加载 .env 文件中的环境变量
 _ = load_dotenv()
+
+from git_tools import get_last_commit_author
+from context7 import context7_mcp_client
 
 # 从环境变量读取配置
 API_KEY = os.getenv("API_KEY")
@@ -25,21 +30,39 @@ def get_api_key() -> str:
         raise ValueError("API_KEY 未找到，请在 .env 文件中设置")
 
 
-llm = ChatOpenAI(
-    base_url=BASE_URL,
-    api_key=get_api_key,
-    model=MODEL_NAME,
-    temperature=0.5,
-    timeout=10,
-)
+@dataclass
+class CommitDiff:
+    lines: str
 
-agent = create_agent(
-    model=llm,
-    tools=[get_last_commit_author],
-)
 
-response= agent.invoke(
-    {"messages": [{"role": "user", "content": "请你找出 /Users/luo/baidu/personal-code/nova-cr-agent 这个项目最近的commit提交人信息"}]}
-)
+class AgentState(TypedDict):
+    repo_path: str
+    pr_info: dict[str, str]
+    
 
-print(response)
+async def main():
+    
+    llm = ChatOpenAI(
+        base_url=BASE_URL,
+        api_key=get_api_key,
+        model=MODEL_NAME,
+        temperature=0.7,
+        timeout=10,
+    )
+
+    # 使用 await 调用异步的 get_tools() 方法
+    context7_tools = await context7_mcp_client.get_tools()
+
+    agent = create_agent(
+        model=llm,
+        tools=[get_last_commit_author, *context7_tools, shell_tool],
+    )
+
+    response = await agent.ainvoke(
+        input= {"messages": [{"role": "user", "content": "请你执行pwd，并告诉我结果"}]},
+    )
+
+    print(response)
+
+if __name__ == "__main__":
+    asyncio.run(main())

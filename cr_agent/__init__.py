@@ -1,4 +1,4 @@
-"""Core package for nova-cr-agent."""
+"""Core package for cr-agent."""
 
 from . import models
 

@@ -2,7 +2,7 @@ import asyncio
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 
-from nova_cr_agent.config import load_openai_config
+from cr_agent.config import load_openai_config
 
 from tools.shell_tools import shell_tool
 from mcp_clients.context7 import context7_mcp_client

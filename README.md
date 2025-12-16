@@ -1,4 +1,4 @@
-# nova-cr-agent
+# cr-agent
 基于LangChain/LangGraph框架的code review agent
 
 实现功能：

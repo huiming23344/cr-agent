@@ -1,5 +1,5 @@
 [project]
-name = "nova-cr-agent"
+name = "cr-agent"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"

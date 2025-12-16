@@ -1968,7 +1968,7 @@ wheels = [
 ]
 
 [[package]]
-name = "nova-cr-agent"
+name = "cr-agent"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

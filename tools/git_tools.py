@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple
 from git import Repo
 from langchain.tools import tool
 
-from nova_cr_agent.models import AgentState, CommitDiff, FileContentRef, FileDiff
+from cr_agent.models import AgentState, CommitDiff, FileContentRef, FileDiff
 
 # === 按需读取的大小上限：1MB（写死） ===
 MAX_FILE_BYTES = 1_000_000

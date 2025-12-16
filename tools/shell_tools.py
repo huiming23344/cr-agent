@@ -4,7 +4,7 @@ from langchain_community.tools import ShellTool
 
 
 class SafeShellTool(ShellTool):
-    """安全的Shell工具,根据命令危险等级决定是否要求确认"""
+    """Secure shell tool with intelligent risk assessment - executes low-risk commands directly, requires confirmation for medium/high-risk commands"""
     
     # 定义低危命令的正则表达式规则
     LOW_RISK_PATTERNS: list[str] = [
@@ -59,21 +59,21 @@ class SafeShellTool(ShellTool):
         super().__init__(**kwargs)
     
     def _is_low_risk_command(self, command: str) -> bool:
-        """判断命令是否为低危命令"""
+        """Check if command is low-risk"""
         for pattern in self.LOW_RISK_PATTERNS:
             if re.match(pattern, command.strip(), re.IGNORECASE):
                 return True
         return False
     
     def _is_high_risk_command(self, command: str) -> bool:
-        """判断命令是否为高危命令"""
+        """Check if command is high-risk"""
         for pattern in self.HIGH_RISK_PATTERNS:
             if re.match(pattern, command.strip(), re.IGNORECASE):
                 return True
         return False
     
     def _get_command_risk_level(self, command: str) -> str:
-        """获取命令的风险等级"""
+        """Get command risk level (low/medium/high)"""
         if self._is_high_risk_command(command):
             return "high"
         elif self._is_low_risk_command(command):
@@ -87,7 +87,7 @@ class SafeShellTool(ShellTool):
         commands: str | list[str],
         run_manager: Any | None = None,  # 使用更通用的类型
     ) -> str:
-        """执行命令，根据风险等级决定是否要求确认"""
+        """Execute command with risk-based confirmation (auto-execute low-risk, confirm medium/high-risk)"""
         # 处理命令可能是字符串或列表的情况
         command_str = commands if isinstance(commands, str) else " ".join(commands)
         
@@ -102,8 +102,8 @@ class SafeShellTool(ShellTool):
         
         # 如果是高危命令，添加额外警告
         if risk_level == "high":
-            print(f"⚠️  警告：检测到高危命令 '{command_str}'")
-            print("该命令可能会对系统造成破坏性影响，请谨慎操作！")
+            print(f"WARNING: Detected high-risk command '{command_str}'")
+            print("This command may cause destructive effects to the system. Proceed with caution!")
         
         return super()._run(command_str, run_manager=run_manager) 
 

@@ -1,18 +1,21 @@
 import os
 import asyncio
-from typing import TypedDict
-from dataclasses import dataclass
+import operator
 
+from typing import TypedDict,Annotated
+from dataclasses import dataclass
 from dotenv import load_dotenv
+
+from langchain.messages import AnyMessage
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 
-from shell_tools import shell_tool
 
 _ = load_dotenv()
 
-from git_tools import get_last_commit_author
-from context7 import context7_mcp_client
+
+from tools.shell_tools import shell_tool
+from mcp_clients.context7 import context7_mcp_client
 
 # 从环境变量读取配置
 API_KEY = os.getenv("API_KEY")
@@ -34,10 +37,6 @@ def get_api_key() -> str:
 class CommitDiff:
     lines: str
 
-
-class AgentState(TypedDict):
-    repo_path: str
-    pr_info: dict[str, str]
     
 
 async def main():
@@ -55,7 +54,7 @@ async def main():
 
     agent = create_agent(
         model=llm,
-        tools=[get_last_commit_author, *context7_tools, shell_tool],
+        tools=[*context7_tools, shell_tool],
     )
 
     response = await agent.ainvoke(

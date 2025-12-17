@@ -97,6 +97,50 @@ class FileCRResult(BaseModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
+# ---- Tagging + tag-based review schema ----
+
+Tag = Literal["STYLE", "ERROR", "API", "CONC", "PERF", "SEC", "TEST", "CONFIG"]
+
+
+class FileTaggingLLMResult(BaseModel):
+    """LLM output for tagging (file_path is filled by the caller)."""
+
+    tags: List[Tag] = Field(default_factory=list)
+    reasoning: Optional[str] = None
+
+
+class FileTaggingResult(BaseModel):
+    """LLM-generated tags for a single file diff."""
+
+    file_path: str
+    tags: List[Tag] = Field(default_factory=list)
+    reasoning: Optional[str] = None
+
+
+class TagCRLLMResult(BaseModel):
+    """LLM output for a tag-specific review (file_path/tag are filled by the caller)."""
+
+    summary: str = Field(..., min_length=3)
+    overall_severity: Severity
+    approved: bool
+    issues: List[CRIssue] = Field(default_factory=list)
+    needs_human_review: bool = False
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TagCRResult(BaseModel):
+    """Review result for one (file, tag) dimension."""
+
+    file_path: str
+    tag: Tag
+    summary: str = Field(..., min_length=3)
+    overall_severity: Severity
+    approved: bool
+    issues: List[CRIssue] = Field(default_factory=list)
+    needs_human_review: bool = False
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentState(TypedDict):
     repo_path: str
     commit_diff: CommitDiff

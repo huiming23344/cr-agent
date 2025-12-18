@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import operator
+import os
 import time
-from typing import Annotated, Iterable, List, Optional, TypedDict
+from typing import Annotated, Iterable, List, Optional, TypedDict, cast
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
@@ -12,6 +13,7 @@ from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from pydantic import ValidationError
+from dotenv import load_dotenv
 
 from cr_agent.models import (
     FileCRResult,
@@ -26,8 +28,7 @@ from cr_agent.rules import RULE_DOMAINS
 
 __all__ = ["FileReviewEngine"]
 
-
-TAGS: tuple[Tag, ...] = RULE_DOMAINS  # type: ignore[assignment]
+load_dotenv()
 
 TAG_DESCRIPTIONS: dict[Tag, str] = {
     "STYLE": "风格/可读性（命名、结构、注释、可维护性）",
@@ -100,6 +101,46 @@ TAG_TOOLS: dict[Tag, List] = {
     "CONFIG": [config_dependency_auditor],
 }
 
+DOMAIN_WHITELIST_ENV = "CR_AGENT_DOMAIN_WHITELIST"
+
+
+def _load_tag_whitelist_from_env() -> tuple[Tag, ...]:
+    """Load enabled domains from env; default to all if unset."""
+    raw_value = os.getenv(DOMAIN_WHITELIST_ENV)
+    if raw_value is None or not raw_value.strip():
+        return cast(tuple[Tag, ...], RULE_DOMAINS)
+
+    sanitized = raw_value.replace("\n", ",").replace(";", ",")
+    requested: List[Tag] = []
+    invalid: List[str] = []
+
+    for chunk in sanitized.split(","):
+        text = chunk.strip().upper()
+        if not text:
+            continue
+        if text not in RULE_DOMAINS:
+            invalid.append(text)
+            continue
+        tag = cast(Tag, text)
+        if tag not in requested:
+            requested.append(tag)
+
+    if invalid:
+        invalid_str = ", ".join(invalid)
+        raise ValueError(
+            f"{DOMAIN_WHITELIST_ENV} 包含未知 domain: {invalid_str}，必须属于 {RULE_DOMAINS}"
+        )
+
+    if not requested:
+        raise ValueError(
+            f"{DOMAIN_WHITELIST_ENV} 未包含任何有效 domain，请从 {RULE_DOMAINS} 中选择至少一个"
+        )
+
+    return tuple(requested)
+
+
+TAGS: tuple[Tag, ...] = _load_tag_whitelist_from_env()
+
 
 class AsyncRateLimiter:
     """简单的异步限速器：确保任意两次进入间隔 >= 1 / qps 秒。"""
@@ -137,6 +178,7 @@ class FileReviewEngine:
         self.llm = llm
         self.max_patch_chars = max_patch_chars
         self.rate_limiter = AsyncRateLimiter(max_qps)
+        self.enabled_tags: tuple[Tag, ...] = TAGS
         self.prepare = RunnableLambda(lambda fd, engine=self: {"payload_json": json.dumps(engine._prepare_payload(fd), ensure_ascii=False)})
         self.tagger_prompt = self._build_tagger_prompt()
         self.tagger_chain = self._build_tagger_chain()
@@ -221,7 +263,7 @@ class FileReviewEngine:
 
     def _build_tag_agents(self) -> dict[Tag, object]:
         agents: dict[Tag, object] = {}
-        for tag in TAGS:
+        for tag in self.enabled_tags:
             prompt = self._build_tag_agent_prompt(tag)
             tools = TAG_TOOLS.get(tag, [])
             agents[tag] = create_react_agent(
@@ -239,14 +281,14 @@ class FileReviewEngine:
         g.add_node("tag_file", self._tag_file_node)
         g.add_node("maybe_finalize", self._maybe_finalize)
 
-        for tag in TAGS:
+        for tag in self.enabled_tags:
             node_name = f"review_{tag}"
             g.add_node(node_name, self._make_tag_reviewer_node(tag))
             g.add_edge(node_name, "maybe_finalize")
 
         g.add_edge(START, "guard_file")
         g.add_conditional_edges("guard_file", self._route_after_guard, {"skip": END, "continue": "tag_file"})
-        g.add_conditional_edges("tag_file", self._route_by_tags, {tag: f"review_{tag}" for tag in TAGS})
+        g.add_conditional_edges("tag_file", self._route_by_tags, {tag: f"review_{tag}" for tag in self.enabled_tags})
         g.add_edge("tag_file", "maybe_finalize")
         g.add_edge("maybe_finalize", END)
         return g.compile()
@@ -342,6 +384,7 @@ class FileReviewEngine:
         tags = self._normalize_tags(llm_result.tags)
         if (file_diff.patch or "").strip() and not tags:
             tags = ["STYLE"]
+        tags = self._filter_enabled_tags(tags)
 
         return FileTaggingResult(file_path=self._file_path(file_diff), tags=tags, reasoning=llm_result.reasoning)
 
@@ -423,6 +466,9 @@ class FileReviewEngine:
             seen.add(tag)
             out.append(tag)
         return out
+
+    def _filter_enabled_tags(self, tags: Iterable[Tag]) -> List[Tag]:
+        return [tag for tag in tags if tag in self.enabled_tags]
 
     @staticmethod
     def _severity_rank(severity: str) -> int:

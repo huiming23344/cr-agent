@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import operator
-import os
+import re
 import time
+from pathlib import Path
 from typing import Annotated, Iterable, List, Optional, TypedDict, cast
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -13,7 +14,6 @@ from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from pydantic import ValidationError
-from dotenv import load_dotenv
 
 from cr_agent.models import (
     FileCRResult,
@@ -28,7 +28,7 @@ from cr_agent.rules import RULE_DOMAINS
 
 __all__ = ["FileReviewEngine"]
 
-load_dotenv()
+BLACKLIST_PATTERNS: tuple[re.Pattern, ...] = tuple()
 
 TAG_DESCRIPTIONS: dict[Tag, str] = {
     "STYLE": "风格/可读性（命名、结构、注释、可维护性）",
@@ -101,49 +101,16 @@ TAG_TOOLS: dict[Tag, List] = {
     "CONFIG": [config_dependency_auditor],
 }
 
-DOMAIN_WHITELIST_ENV = "CR_AGENT_DOMAIN_WHITELIST"
+class _AsyncLimiterBase:
+    async def __aenter__(self):
+        ...
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
-def _load_tag_whitelist_from_env() -> tuple[Tag, ...]:
-    """Load enabled domains from env; default to all if unset."""
-    raw_value = os.getenv(DOMAIN_WHITELIST_ENV)
-    if raw_value is None or not raw_value.strip():
-        return cast(tuple[Tag, ...], RULE_DOMAINS)
-
-    sanitized = raw_value.replace("\n", ",").replace(";", ",")
-    requested: List[Tag] = []
-    invalid: List[str] = []
-
-    for chunk in sanitized.split(","):
-        text = chunk.strip().upper()
-        if not text:
-            continue
-        if text not in RULE_DOMAINS:
-            invalid.append(text)
-            continue
-        tag = cast(Tag, text)
-        if tag not in requested:
-            requested.append(tag)
-
-    if invalid:
-        invalid_str = ", ".join(invalid)
-        raise ValueError(
-            f"{DOMAIN_WHITELIST_ENV} 包含未知 domain: {invalid_str}，必须属于 {RULE_DOMAINS}"
-        )
-
-    if not requested:
-        raise ValueError(
-            f"{DOMAIN_WHITELIST_ENV} 未包含任何有效 domain，请从 {RULE_DOMAINS} 中选择至少一个"
-        )
-
-    return tuple(requested)
-
-
-TAGS: tuple[Tag, ...] = _load_tag_whitelist_from_env()
-
-
-class AsyncRateLimiter:
-    """简单的异步限速器：确保任意两次进入间隔 >= 1 / qps 秒。"""
+class AsyncRateLimiter(_AsyncLimiterBase):
+    """简单限速器：确保任意两次调用间隔 >= 1 / qps 秒。"""
 
     def __init__(self, qps: float):
         self.interval = 1.0 / max(qps, 1e-6)
@@ -158,8 +125,9 @@ class AsyncRateLimiter:
                 await asyncio.sleep(wait)
             self._next_time = time.monotonic() + self.interval
 
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
+
+class NoopRateLimiter(_AsyncLimiterBase):
+    """No-op context manager used when no rate limit is configured."""
 
 
 class FileReviewState(TypedDict):
@@ -174,11 +142,22 @@ class FileReviewState(TypedDict):
 class FileReviewEngine:
     """负责单个文件的打标、标签路由和结果合并。"""
 
-    def __init__(self, llm, *, max_patch_chars: int = 12_000, max_qps: float = 1.0):
+    def __init__(
+        self,
+        llm,
+        *,
+        max_patch_chars: int = 12_000,
+        rate_limiter: Optional[_AsyncLimiterBase] = None,
+        allowed_tags: Optional[tuple[Tag, ...]] = None,
+        blacklist_patterns: Optional[tuple[re.Pattern, ...]] = None,
+        blacklist_basenames: Optional[Iterable[str]] = None,
+    ):
         self.llm = llm
         self.max_patch_chars = max_patch_chars
-        self.rate_limiter = AsyncRateLimiter(max_qps)
-        self.enabled_tags: tuple[Tag, ...] = TAGS
+        self.rate_limiter = rate_limiter or NoopRateLimiter()
+        self.enabled_tags: tuple[Tag, ...] = allowed_tags or cast(tuple[Tag, ...], RULE_DOMAINS)
+        self.blacklist_patterns: tuple[re.Pattern, ...] = blacklist_patterns or ()
+        self.blacklist_basenames = {name.strip() for name in (blacklist_basenames or []) if name and name.strip()}
         self.prepare = RunnableLambda(lambda fd, engine=self: {"payload_json": json.dumps(engine._prepare_payload(fd), ensure_ascii=False)})
         self.tagger_prompt = self._build_tagger_prompt()
         self.tagger_chain = self._build_tagger_chain()
@@ -299,6 +278,16 @@ class FileReviewEngine:
 
     def _guard_file(self, state: FileReviewState):
         fd = state["file_diff"]
+        if self._matches_blacklist(fd):
+            return {
+                "skip": True,
+                "tags": [],
+                "file_cr_result": self._skip_file_result(
+                    fd,
+                    reason="name_blacklist",
+                    summary="文件名匹配黑名单，跳过自动代码审查，请人工确认。",
+                ),
+            }
         if getattr(fd, "is_binary", False):
             return {
                 "skip": True,
@@ -329,7 +318,7 @@ class FileReviewEngine:
         return "skip" if state.get("skip") else "continue"
 
     def _route_by_tags(self, state: FileReviewState):
-        return state.get("tags", [])
+        return [t for t in state.get("tags", []) if t in self.enabled_tags]
 
     def _make_tag_reviewer_node(self, tag: Tag):
         async def _node(state: FileReviewState):
@@ -455,6 +444,13 @@ class FileReviewEngine:
     @staticmethod
     def _file_path(file_diff: FileDiff) -> str:
         return file_diff.b_path or file_diff.a_path or "<unknown>"
+
+    def _matches_blacklist(self, file_diff: FileDiff) -> bool:
+        path = FileReviewEngine._file_path(file_diff)
+        basename = Path(path).name
+        if basename in self.blacklist_basenames:
+            return True
+        return any(pattern.search(path) for pattern in self.blacklist_patterns)
 
     @staticmethod
     def _normalize_tags(tags: Iterable[Tag]) -> List[Tag]:

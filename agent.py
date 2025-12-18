@@ -1,40 +1,54 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+import os
 from pathlib import Path
+from typing import Optional
 
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
-from cr_agent.config import load_openai_config, load_repo_path
-from cr_agent.file_review import FileReviewEngine
+from cr_agent.config import load_openai_config
+from cr_agent.file_review import AsyncRateLimiter, FileReviewEngine
 from cr_agent.models import AgentState
+from cr_agent.profile import ProfileConfig, RepoProfile, load_profile
 from tools.git_tools import get_last_commit_diff
 
-model_config = load_openai_config(timeout=600)
-llm = ChatOpenAI(
-    base_url=model_config.base_url,
-    api_key=model_config.api_key,
-    model=model_config.model_name,
-    temperature=model_config.temperature,
-    timeout=model_config.timeout,
-)
 
-file_reviewer = FileReviewEngine(llm, max_qps=1.0)
-
-
-async def review_all_files(state: AgentState):
-    """对 commit diff 中的所有文件并行审查（LLM 总 QPS 受 file_reviewer 控制）。"""
-    commit_diff = state["commit_diff"]
-    tasks = [file_reviewer.review_file(fd) for fd in commit_diff.files]
-    return {"file_cr_result": await asyncio.gather(*tasks)} if tasks else {"file_cr_result": []}
+def _load_env(env_file: Optional[str]) -> None:
+    """Load .env or specified env file without overriding existing env vars."""
+    if env_file:
+        load_dotenv(env_file, override=False)
+    else:
+        default_env = Path(".env")
+        if default_env.exists():
+            load_dotenv(default_env, override=False)
 
 
-def print_resule(state: AgentState):
-    print(state["file_cr_result"])
+def _resolve_repo_path(arg_repo: Optional[str]) -> str:
+    if arg_repo:
+        return str(Path(arg_repo).expanduser().resolve())
+    env_repo = os.getenv("CR_REPO_PATH")
+    if env_repo:
+        return str(Path(env_repo).expanduser().resolve())
+    return str(Path(__file__).resolve().parent)
 
 
-def build_review_agent():
+def _select_profile(profile_cfg: ProfileConfig, repo_path: str) -> RepoProfile:
+    return profile_cfg.match_repo(repo_path)
+
+
+def _build_review_agent(file_reviewer: FileReviewEngine):
+    async def review_all_files(state: AgentState):
+        commit_diff = state["commit_diff"]
+        tasks = [file_reviewer.review_file(fd) for fd in commit_diff.files]
+        return {"file_cr_result": await asyncio.gather(*tasks)} if tasks else {"file_cr_result": []}
+
+    def print_resule(state: AgentState):
+        print(state["file_cr_result"])
+
     agent_builder = StateGraph(AgentState)
     agent_builder.add_node("get_last_commit_diff", get_last_commit_diff)
     agent_builder.add_node("review_all_files", review_all_files)
@@ -47,14 +61,58 @@ def build_review_agent():
     return agent_builder.compile()
 
 
-review_agent = build_review_agent()
+def main():
+    parser = argparse.ArgumentParser(description="Run code review agent.")
+    parser.add_argument("--repo", help="Repository root path (arg > env > .env).")
+    parser.add_argument("--profile", help="Profile YAML for repo/domain/skip rules (arg > env > none).")
+    parser.add_argument("--env-file", dest="env_file", help="Custom .env file to load (no override).")
+    args = parser.parse_args()
 
+    _load_env(args.env_file)
+    repo_path = _resolve_repo_path(args.repo)
 
-def run_default_repo():
-    default_repo_root = Path(__file__).resolve().parent
-    repo_root = str(load_repo_path(default=str(default_repo_root)))
-    return asyncio.run(review_agent.ainvoke({"repo_path": repo_root, "file_cr_result": []}))
+    profile_cfg: Optional[ProfileConfig] = None
+    selected_repo: Optional[RepoProfile] = None
+    profile_path = args.profile or os.getenv("CR_PROFILE_PATH")
+    if profile_path:
+        profile_cfg = load_profile(Path(profile_path))
+        selected_repo = _select_profile(profile_cfg, repo_path)
+
+    allowed_tags = selected_repo.domains if selected_repo else None
+    blacklist_patterns = selected_repo.skip_regex if selected_repo else None
+    blacklist_basenames = selected_repo.skip_basenames if selected_repo else None
+
+    model_config = load_openai_config(timeout=600)
+    llm = ChatOpenAI(
+        base_url=model_config.base_url,
+        api_key=model_config.api_key,
+        model=model_config.model_name,
+        temperature=model_config.temperature,
+        timeout=model_config.timeout,
+    )
+
+    max_qps_value = os.getenv("CR_MAX_QPS")
+    rate_limiter = None
+    if max_qps_value:
+        try:
+            max_qps = float(max_qps_value)
+            if max_qps > 0:
+                rate_limiter = AsyncRateLimiter(max_qps)
+        except ValueError as exc:
+            raise ValueError(f"CR_MAX_QPS must be a number, got {max_qps_value}") from exc
+
+    file_reviewer = FileReviewEngine(
+        llm,
+        rate_limiter=rate_limiter,
+        allowed_tags=allowed_tags,
+        blacklist_patterns=blacklist_patterns,
+        blacklist_basenames=blacklist_basenames,
+    )
+    review_agent = _build_review_agent(file_reviewer)
+
+    result = asyncio.run(review_agent.ainvoke({"repo_path": repo_path, "file_cr_result": []}))
+    return result
 
 
 if __name__ == "__main__":
-    run_default_repo()
+    main()

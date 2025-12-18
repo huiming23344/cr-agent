@@ -1,0 +1,22 @@
+version: 1
+repos:
+  - name: foo-service
+    priority: 10
+    match_paths:
+      - "^/Users/you/work/foo-service(/|$)"
+    domains: ["SEC", "PERF"]
+    skip_regex:
+      - "^docs/generated/.*"
+      - "\\.pb\\.go$"
+    skip_basenames: ["README.md"]
+  - name: bar-cli
+    priority: 20
+    match_paths:
+      - "^/Users/you/work/bar-cli(/|$)"
+    domains: ["STYLE", "TEST"]
+    skip_regex: []
+    skip_basenames: []
+default:
+  domains: ["STYLE"]
+  skip_regex: []
+  skip_basenames: []

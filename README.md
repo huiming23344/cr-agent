@@ -1,5 +1,6 @@
 # cr-agent
-基于LangChain/LangGraph框架的 code review agent，支持多标签/多文件并发审查，并可按 repo/domain/环境灵活配置。
+基于既有的私有代码规范，以错误检出率优先、规则驱动的 Code Review Agent，降低团队人工审查成本并提升规范一致性。
+
 
 主要特性：
 1. 并行/限速审查：对一个 diff 中所有文件并行发起 tag+子 agent，

@@ -12,8 +12,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import create_react_agent
 from pydantic import ValidationError
+from cr_agent.agents import ReactDomainAgent, StaticPromptBuilder
 
 from cr_agent.models import (
     FileCRResult,
@@ -24,7 +24,8 @@ from cr_agent.models import (
     TagCRLLMResult,
     TagCRResult,
 )
-from cr_agent.rules import RULE_DOMAINS
+from cr_agent.rules import RULE_DOMAINS, RuleMeta, get_rules_catalog
+from tools.standard_tools import code_standard_doc
 
 __all__ = ["FileReviewEngine"]
 
@@ -42,63 +43,15 @@ TAG_DESCRIPTIONS: dict[Tag, str] = {
 }
 
 
-@tool
-def style_guideline_lookup(query: str) -> str:
-    """查询风格/可读性规范或示例。"""
-    return f"[STYLE指引] 暂未实现真实查找：请根据上下文自查。输入：{query}"
-
-
-@tool
-def error_case_library(query: str) -> str:
-    """检索常见错误处理策略示例。"""
-    return f"[ERROR案例] 暂未实现真实查找，请结合日志和代码确认。输入：{query}"
-
-
-@tool
-def api_contract_checker(query: str) -> str:
-    """检查接口设计/兼容性注意事项。"""
-    return f"[API契约] 暂未实现真实校验：请人工核对接口文档。输入：{query}"
-
-
-@tool
-def concurrency_pattern_helper(query: str) -> str:
-    """提供并发/同步模式的参考建议。"""
-    return f"[CONC建议] 暂未实现真实分析：请审核锁、goroutine、任务调度。输入：{query}"
-
-
-@tool
-def performance_budget_tool(query: str) -> str:
-    """估算热点/复杂度/资源占用等性能风险。"""
-    return f"[PERF预算] 暂未实现真实 profiling：请关注复杂度与缓存策略。输入：{query}"
-
-
-@tool
-def security_threat_scanner(query: str) -> str:
-    """提示潜在安全威胁（鉴权、注入、敏感信息）。"""
-    return f"[SEC扫描] 暂未实现真实检测：请人工检查敏感路径。输入：{query}"
-
-
-@tool
-def test_coverage_inspector(query: str) -> str:
-    """审查测试覆盖、用例质量与回归风险。"""
-    return f"[TEST覆盖] 暂未实现真实统计：请检查新增/受影响场景。输入：{query}"
-
-
-@tool
-def config_dependency_auditor(query: str) -> str:
-    """检查配置/依赖/部署影响。"""
-    return f"[CONFIG审计] 暂未实现真实审计：请确认依赖版本与环境变量。输入：{query}"
-
-
 TAG_TOOLS: dict[Tag, List] = {
-    "STYLE": [style_guideline_lookup],
-    "ERROR": [error_case_library],
-    "API": [api_contract_checker],
-    "CONC": [concurrency_pattern_helper],
-    "PERF": [performance_budget_tool],
-    "SEC": [security_threat_scanner],
-    "TEST": [test_coverage_inspector],
-    "CONFIG": [config_dependency_auditor],
+    "STYLE": [],
+    "ERROR": [],
+    "API": [],
+    "CONC": [],
+    "PERF": [],
+    "SEC": [],
+    "TEST": [],
+    "CONFIG": [],
 }
 
 class _AsyncLimiterBase:
@@ -219,13 +172,15 @@ class FileReviewEngine:
 
     def _build_tag_agent_prompt(self, tag: Tag) -> str:
         desc = TAG_DESCRIPTIONS[tag]
-        tools = TAG_TOOLS.get(tag, [])
+        tools = self._tools_for_tag(tag)
         tool_lines = "\n".join(
             f"- {tool.name}: {getattr(tool, 'description', '').strip() or '专项辅助工具'}" for tool in tools
         ) or "- （无可用工具）"
         return (
             f"你是一名资深代码审查专家，专注于 [{tag}] 方向：{desc}。\n"
             "使用 ReAct 策略（思考 -> 如需工具则调用 -> 根据工具结果总结）。\n"
+            "你会收到一组与本标签/语言相关的代码规范（standards），需要优先依据这些规范进行审查；必要时引用 rule_id。\n"
+            "如需查看规范细节，可调用 code_standard_doc(rule_id) 读取 Markdown 文档（仅当规则提供文档路径）。\n"
             "可用工具：\n"
             f"{tool_lines}\n\n"
             "输出要求：\n"
@@ -240,16 +195,17 @@ class FileReviewEngine:
             retry_if_exception_type=(ValidationError, ValueError),
         )
 
-    def _build_tag_agents(self) -> dict[Tag, object]:
-        agents: dict[Tag, object] = {}
+    def _build_tag_agents(self) -> dict[Tag, ReactDomainAgent]:
+        agents: dict[Tag, ReactDomainAgent] = {}
         for tag in self.enabled_tags:
-            prompt = self._build_tag_agent_prompt(tag)
-            tools = TAG_TOOLS.get(tag, [])
-            agents[tag] = create_react_agent(
-                self.llm,
+            prompt_builder = StaticPromptBuilder(self._build_tag_agent_prompt(tag))
+            tools = self._tools_for_tag(tag)
+            agents[tag] = ReactDomainAgent(
+                llm=self.llm,
+                prompt_builder=prompt_builder,
                 tools=tools,
-                prompt=prompt,
                 response_format=TagCRLLMResult,
+                name=f"tag-{tag}",
             )
         return agents
 
@@ -378,10 +334,15 @@ class FileReviewEngine:
         return FileTaggingResult(file_path=self._file_path(file_diff), tags=tags, reasoning=llm_result.reasoning)
 
     async def _review_tag(self, file_diff: FileDiff, tag: Tag) -> TagCRResult:
+        language = self._infer_language(file_diff)
+        standards = self._get_rules_for(tag=tag, language=language)
+        standards_text = self._format_rules_for_prompt(standards)
+
         payload_json = json.dumps(self._prepare_payload(file_diff), ensure_ascii=False)
         user_message = (
             "请针对下列文件 diff 执行专项代码审查，并仅关注本标签相关的问题。\n"
-            "需要时可以调用可用工具。\n"
+            f"适用代码规范（language={language or 'unknown'}, domain={tag}）：\n{standards_text}\n"
+            "需要时可以调用可用工具（若规范提供文档，可用 code_standard_doc(rule_id) 查看细节）。\n"
             "输入(JSON)：\n"
             f"{payload_json}"
         )
@@ -465,6 +426,61 @@ class FileReviewEngine:
 
     def _filter_enabled_tags(self, tags: Iterable[Tag]) -> List[Tag]:
         return [tag for tag in tags if tag in self.enabled_tags]
+
+    def _tools_for_tag(self, tag: Tag) -> List:
+        """Return tools for a tag, always including code_standard_doc."""
+        base = list(TAG_TOOLS.get(tag, []))
+        if code_standard_doc not in base:
+            base.append(code_standard_doc)
+        return base
+
+    def _infer_language(self, file_diff: FileDiff) -> Optional[str]:
+        path = self._file_path(file_diff).lower()
+        suffix = Path(path).suffix
+        if suffix == ".go":
+            return "go"
+        if suffix == ".py":
+            return "python"
+        return None
+
+    def _get_rules_for(self, *, tag: Tag, language: Optional[str]) -> List[RuleMeta]:
+        try:
+            catalog = get_rules_catalog()
+        except Exception:
+            return []
+
+        if language:
+            by_lang_domain = catalog.by_language_domain.get(language, {})
+            rules = by_lang_domain.get(tag, [])
+            if rules:
+                return list(rules)
+
+        # Fallback to cross-language domain list
+        return list(catalog.by_domain.get(tag, []))
+
+    @staticmethod
+    def _format_rules_for_prompt(rules: List[RuleMeta]) -> str:
+        if not rules:
+            return "- 无匹配规范（按通用审查逻辑处理）"
+
+        lines: List[str] = []
+        for meta in rules:
+            details: List[str] = []
+            if meta.severity:
+                details.append(f"severity={meta.severity}")
+            if meta.prompt_hint:
+                details.append(meta.prompt_hint)
+            if meta.doc_path:
+                details.append("可用 code_standard_doc(rule_id) 查看文档")
+
+            detail_str = "；".join(details)
+            title = meta.title or "未命名规则"
+            if detail_str:
+                lines.append(f"- {meta.rule_id}: {title}｜{detail_str}")
+            else:
+                lines.append(f"- {meta.rule_id}: {title}")
+
+        return "\n".join(lines)
 
     @staticmethod
     def _severity_rank(severity: str) -> int:

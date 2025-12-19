@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, Sequence
 
+from cr_agent.rate_limiter import RateLimiterProtocol
+
 
 class PromptBuilder(Protocol):
     """Builds the system prompt for an agent."""
@@ -43,12 +45,14 @@ class BaseDomainAgent:
         tools: Optional[Sequence[Any]] = None,
         response_format: Optional[Any] = None,
         name: Optional[str] = None,
+        rate_limiter: Optional[RateLimiterProtocol] = None,
     ):
         self.llm = llm
         self.prompt_builder = prompt_builder
         self.tools = list(tools or [])
         self.response_format = response_format
         self.name = name or self.__class__.__name__
+        self.rate_limiter = rate_limiter
         self.runtime = self._create_runtime()
 
     def _create_runtime(self):

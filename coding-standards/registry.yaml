@@ -9,16 +9,6 @@ rules:
       对所有返回 error 的调用必须处理或显式忽略（_ = 并注明原因）。
       发现丢弃 error 时给出具体位置、影响、修复建议。
 
-  - id: GO-CONC-001
-    title: "启动 goroutine 必须可控：避免泄漏与无收敛"
-    language: go
-    severity: warning
-    domains: [CONC, PERF]
-    path: "coding-standards/rules/go/GO-CONC-001.md"
-    prompt_hint: >
-      新增 goroutine 需要有退出条件（context/close channel），避免泄漏；
-      如涉及 WaitGroup，确保 Add/Done/Wait 配对且异常路径不丢 Done。
-
   - id: GO-SEC-001
     title: "敏感配置和凭证必须加密管理"
     language: go
@@ -39,20 +29,4 @@ rules:
       检查新增/修改的导出类型、函数、常量和接口是否带有 Go 风格注释（以名称开头）。
       确保注释解释用途、关键约束以及并发/性能注意事项，避免信息缺失。
 
-  - id: PY-UNICODE-002
-    title: "文本 IO 必须显式指定编码"
-    language: python
-    severity: warning
-    domains: [STYLE, ERROR]
-    path: "coding-standards/rules/python/PY-UNICODE-002.md"
-    prompt_hint: >
-      读取/写入文本文件时应显式指定 encoding（建议 utf-8），避免跨平台乱码。
 
-  - id: PY-TEST-001
-    title: "新增逻辑必须配套测试覆盖"
-    language: python
-    severity: info
-    domains: [TEST, STYLE]
-    path: "coding-standards/rules/python/PY-TEST-001.md"
-    prompt_hint: >
-      新增模块/函数需要添加单元或集成测试，描述覆盖的正/负路径。

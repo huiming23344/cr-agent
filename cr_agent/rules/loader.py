@@ -5,7 +5,7 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 class RulesConfigError(ValueError):
@@ -38,41 +38,15 @@ class RulesCatalog:
     by_language_domain: Dict[str, Dict[str, List[RuleMeta]]]
 
 
-def load_rules_catalog(
-    *,
-    registry_path: Path,
-    profile_path: Path,
-) -> RulesCatalog:
-    """Load rule metadata from registry + profile and return enabled RuleIndex.
-
-    - registry.yaml: defines all rules and their metadata.
-    - profile.yaml: selects enabled rules via `enable`/`disable` patterns (supports wildcards like GO-*).
-    """
+def load_rules_catalog(*, registry_path: Path) -> RulesCatalog:
+    """Load rule metadata from registry.yaml without profile filtering."""
     registry_path = Path(registry_path).expanduser().resolve()
-    profile_path = Path(profile_path).expanduser().resolve()
-
     registry = _load_yaml(registry_path)
-    profile = _load_yaml(profile_path)
 
     standards_dir = registry_path.parent
     repo_root = standards_dir.parent
 
-    all_rules = _parse_registry_rules(registry, standards_dir=standards_dir, repo_root=repo_root)
-    selection = _parse_profile_selection(profile)
-
-    enabled_rule_ids = _apply_enable_disable(
-        all_rules=all_rules,
-        enable_patterns=selection.enable,
-        disable_patterns=selection.disable,
-    )
-
-    rules_index: RuleIndex = {}
-    overrides = selection.overrides
-    for rule_id in enabled_rule_ids:
-        meta = all_rules[rule_id]
-        if rule_id in overrides and isinstance(overrides[rule_id], dict):
-            meta = _apply_overrides(meta, overrides[rule_id])
-        rules_index[rule_id] = meta
+    rules_index = _parse_registry_rules(registry, standards_dir=standards_dir, repo_root=repo_root)
 
     by_language = _aggregate_by_language(rules_index)
     by_domain = _aggregate_by_domain(rules_index)
@@ -85,77 +59,9 @@ def load_rules_catalog(
     )
 
 
-def load_rules_index(*, registry_path: Path, profile_path: Path) -> RuleIndex:
+def load_rules_index(*, registry_path: Path) -> RuleIndex:
     """Backwards compatible helper returning only the id->RuleMeta mapping."""
-    return load_rules_catalog(registry_path=registry_path, profile_path=profile_path).by_id
-
-
-@dataclass(frozen=True)
-class ProfileSelection:
-    enable: List[str] = field(default_factory=list)
-    disable: List[str] = field(default_factory=list)
-    overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-
-
-def _parse_profile_selection(profile: Any) -> ProfileSelection:
-    if not isinstance(profile, dict):
-        raise RulesConfigError("profile.yaml 必须是 YAML mapping（dict）")
-
-    enable: List[str] = []
-    disable: List[str] = []
-
-    if isinstance(profile.get("enable"), list):
-        enable = [str(x) for x in profile["enable"] if x is not None]
-    elif isinstance(profile.get("rules"), dict):
-        enable = _enable_patterns_from_legacy_rules(profile["rules"])
-
-    if isinstance(profile.get("disable"), list):
-        disable = [str(x) for x in profile["disable"] if x is not None]
-
-    overrides_raw = profile.get("overrides", {})
-    overrides: Dict[str, Dict[str, Any]] = {}
-    if isinstance(overrides_raw, dict):
-        for rule_id, override in overrides_raw.items():
-            if isinstance(override, dict):
-                overrides[str(rule_id)] = dict(override)
-
-    return ProfileSelection(enable=enable, disable=disable, overrides=overrides)
-
-
-def _enable_patterns_from_legacy_rules(rules_node: Dict[str, Any]) -> List[str]:
-    patterns: List[str] = []
-    for _, rule_list in rules_node.items():
-        if not isinstance(rule_list, list):
-            continue
-        for item in rule_list:
-            if item is None:
-                continue
-            patterns.append(str(item))
-    return patterns
-
-
-def _apply_enable_disable(
-    *,
-    all_rules: Dict[str, RuleMeta],
-    enable_patterns: Sequence[str],
-    disable_patterns: Sequence[str],
-) -> List[str]:
-    enabled: set[str] = set()
-
-    patterns = list(enable_patterns)
-    if not patterns:
-        return []
-
-    rules = list(all_rules.values())
-    for pattern in patterns:
-        matched = {meta.rule_id for meta in rules if _pattern_matches_rule(pattern, meta)}
-        enabled.update(matched)
-
-    for pattern in disable_patterns:
-        matched = {meta.rule_id for meta in rules if _pattern_matches_rule(pattern, meta)}
-        enabled.difference_update(matched)
-
-    return sorted(enabled)
+    return load_rules_catalog(registry_path=registry_path).by_id
 
 
 def _aggregate_by_language(rules_index: RuleIndex) -> Dict[str, List[RuleMeta]]:
@@ -186,54 +92,6 @@ def _aggregate_by_language_domain(rules_index: RuleIndex) -> Dict[str, Dict[str,
         language: {domain: grouped[language][domain] for domain in sorted(grouped[language])}
         for language in sorted(grouped)
     }
-
-
-def _pattern_matches_rule(pattern: str, meta: RuleMeta) -> bool:
-    pattern = str(pattern).strip()
-    if not pattern:
-        return False
-
-    full_id = f"{meta.language}/{meta.rule_id}" if meta.language else meta.rule_id
-
-    return fnmatch.fnmatchcase(meta.rule_id, pattern) or fnmatch.fnmatchcase(full_id, pattern)
-
-
-def _apply_overrides(meta: RuleMeta, override: Dict[str, Any]) -> RuleMeta:
-    raw = dict(meta.raw)
-    raw.update(override)
-
-    title = str(override.get("title", meta.title)) if override.get("title") is not None else meta.title
-    language = (
-        str(override.get("language", meta.language))
-        if override.get("language") is not None
-        else meta.language
-    )
-    severity = str(override.get("severity", meta.severity)) if override.get("severity") is not None else meta.severity
-    domains = meta.domains
-    if override.get("domains") is not None:
-        domains = _normalize_domains(override.get("domains"))
-    elif override.get("domain") is not None:
-        domains = _normalize_domains(override.get("domain"))
-    prompt_hint = (
-        str(override.get("prompt_hint", meta.prompt_hint))
-        if override.get("prompt_hint") is not None
-        else meta.prompt_hint
-    )
-
-    doc_path = meta.doc_path
-    if override.get("path") is not None:
-        doc_path = Path(str(override["path"])).expanduser().resolve()
-
-    return RuleMeta(
-        rule_id=meta.rule_id,
-        title=title,
-        language=language,
-        severity=severity,
-        domains=domains,
-        prompt_hint=prompt_hint,
-        doc_path=doc_path,
-        raw=raw,
-    )
 
 
 def _parse_registry_rules(
@@ -551,7 +409,7 @@ def _parse_scalar(value: str) -> Any:
         try:
             return json.loads(value)
         except Exception:
-            return value
+            return _parse_inline_list_fallback(value[1:-1])
 
     try:
         if "." in value:
@@ -598,3 +456,33 @@ def _strip_comment(content: str) -> str:
         elif ch == "#" and not in_single and not in_double:
             return content[:idx].rstrip()
     return content
+
+
+def _parse_inline_list_fallback(inner: str) -> List[Any]:
+    """Parse YAML-style inline lists like [ERROR, STYLE] without quoting."""
+    items: List[Any] = []
+    token = []
+    in_single = False
+    in_double = False
+    for ch in inner:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            token.append(ch)
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            token.append(ch)
+            continue
+        if ch == "," and not in_single and not in_double:
+            text = "".join(token).strip()
+            if text:
+                items.append(_parse_scalar(text))
+            token = []
+            continue
+        token.append(ch)
+
+    text = "".join(token).strip()
+    if text:
+        items.append(_parse_scalar(text))
+
+    return items

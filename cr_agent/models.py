@@ -84,6 +84,7 @@ class CRIssue(BaseModel):
     line_end: Optional[int] = Field(default=None, ge=1)
     suggestion: Optional[str] = None
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    rule_ids: List[str] = Field(default_factory=list)
 
 
 class FileCRResult(BaseModel):
@@ -93,6 +94,7 @@ class FileCRResult(BaseModel):
     overall_severity: Severity
     approved: bool
     issues: List[CRIssue] = Field(default_factory=list)
+    rule_ids: List[str] = Field(default_factory=list)
     needs_human_review: bool = False
     meta: Dict[str, Any] = Field(default_factory=dict)
 
@@ -138,6 +140,7 @@ class TagCRResult(BaseModel):
     approved: bool
     issues: List[CRIssue] = Field(default_factory=list)
     needs_human_review: bool = False
+    rule_ids: List[str] = Field(default_factory=list)
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 

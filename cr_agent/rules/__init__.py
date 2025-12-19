@@ -15,33 +15,37 @@ from .loader import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REGISTRY_PATH = _REPO_ROOT / "coding-standards" / "registry.yaml"
-DEFAULT_PROFILE_PATH = _REPO_ROOT / "coding-standards" / "profiles" / "default.yaml"
 
 GLOBAL_RULES_CATALOG: Optional[RulesCatalog]
 GLOBAL_RULES_BY_LANGUAGE: Dict[str, List[RuleMeta]]
 GLOBAL_RULES_BY_DOMAIN: Dict[str, List[RuleMeta]]
 GLOBAL_RULES_BY_LANGUAGE_DOMAIN: Dict[str, Dict[str, List[RuleMeta]]]
 
-def _load_default_catalog() -> Optional[RulesCatalog]:
+
+def _empty_catalog() -> RulesCatalog:
+    return RulesCatalog(by_id={}, by_language={}, by_domain={}, by_language_domain={})
+
+
+def _load_default_catalog() -> RulesCatalog:
     try:
-        if DEFAULT_REGISTRY_PATH.exists() and DEFAULT_PROFILE_PATH.exists():
-            return load_rules_catalog(registry_path=DEFAULT_REGISTRY_PATH, profile_path=DEFAULT_PROFILE_PATH)
+        if DEFAULT_REGISTRY_PATH.exists():
+            return load_rules_catalog(registry_path=DEFAULT_REGISTRY_PATH)
     except Exception:
-        return None
-    return None
+        pass
+    return _empty_catalog()
 
 
 GLOBAL_RULES_CATALOG = _load_default_catalog()
-GLOBAL_RULES_BY_LANGUAGE = GLOBAL_RULES_CATALOG.by_language if GLOBAL_RULES_CATALOG else {}
-GLOBAL_RULES_BY_DOMAIN = GLOBAL_RULES_CATALOG.by_domain if GLOBAL_RULES_CATALOG else {}
-GLOBAL_RULES_BY_LANGUAGE_DOMAIN = GLOBAL_RULES_CATALOG.by_language_domain if GLOBAL_RULES_CATALOG else {}
+GLOBAL_RULES_BY_LANGUAGE = GLOBAL_RULES_CATALOG.by_language
+GLOBAL_RULES_BY_DOMAIN = GLOBAL_RULES_CATALOG.by_domain
+GLOBAL_RULES_BY_LANGUAGE_DOMAIN = GLOBAL_RULES_CATALOG.by_language_domain
 
 
 def get_rules_catalog() -> RulesCatalog:
     """Return default rules catalog, loading it on-demand if needed."""
     global GLOBAL_RULES_CATALOG, GLOBAL_RULES_BY_LANGUAGE, GLOBAL_RULES_BY_DOMAIN, GLOBAL_RULES_BY_LANGUAGE_DOMAIN
-    if GLOBAL_RULES_CATALOG is None:
-        catalog = load_rules_catalog(registry_path=DEFAULT_REGISTRY_PATH, profile_path=DEFAULT_PROFILE_PATH)
+    if not GLOBAL_RULES_CATALOG or not GLOBAL_RULES_CATALOG.by_id:
+        catalog = _load_default_catalog()
         GLOBAL_RULES_CATALOG = catalog
         GLOBAL_RULES_BY_LANGUAGE = catalog.by_language
         GLOBAL_RULES_BY_DOMAIN = catalog.by_domain

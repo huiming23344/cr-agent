@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 from cr_agent.agents import ReactDomainAgent, StaticPromptBuilder
+from cr_agent.rate_limiter import AsyncRateLimiter, NoopRateLimiter, RateLimiterProtocol
 
 from cr_agent.models import (
     FileCRResult,
@@ -54,34 +55,6 @@ TAG_TOOLS: dict[Tag, List] = {
     "CONFIG": [],
 }
 
-class _AsyncLimiterBase:
-    async def __aenter__(self):
-        ...
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-
-class AsyncRateLimiter(_AsyncLimiterBase):
-    """简单限速器：确保任意两次调用间隔 >= 1 / qps 秒。"""
-
-    def __init__(self, qps: float):
-        self.interval = 1.0 / max(qps, 1e-6)
-        self._lock = asyncio.Lock()
-        self._next_time = 0.0
-
-    async def __aenter__(self):
-        async with self._lock:
-            now = time.monotonic()
-            wait = max(0.0, self._next_time - now)
-            if wait:
-                await asyncio.sleep(wait)
-            self._next_time = time.monotonic() + self.interval
-
-
-class NoopRateLimiter(_AsyncLimiterBase):
-    """No-op context manager used when no rate limit is configured."""
-
 
 class FileReviewState(TypedDict):
     file_diff: FileDiff
@@ -100,7 +73,7 @@ class FileReviewEngine:
         llm,
         *,
         max_patch_chars: int = 12_000,
-        rate_limiter: Optional[_AsyncLimiterBase] = None,
+        rate_limiter: Optional[RateLimiterProtocol] = None,
         allowed_tags: Optional[tuple[Tag, ...]] = None,
         blacklist_patterns: Optional[tuple[re.Pattern, ...]] = None,
         blacklist_basenames: Optional[Iterable[str]] = None,
@@ -177,16 +150,47 @@ class FileReviewEngine:
             f"- {tool.name}: {getattr(tool, 'description', '').strip() or '专项辅助工具'}" for tool in tools
         ) or "- （无可用工具）"
         return (
-            f"你是一名资深代码审查专家，专注于 [{tag}] 方向：{desc}。\n"
-            "使用 ReAct 策略（思考 -> 如需工具则调用 -> 根据工具结果总结）。\n"
-            "你会收到一组与本标签/语言相关的代码规范（standards），需要优先依据这些规范进行审查；必要时引用 rule_id。\n"
-            "如需查看规范细节，可调用 code_standard_doc(rule_id) 读取 Markdown 文档（仅当规则提供文档路径）。\n"
-            "可用工具：\n"
-            f"{tool_lines}\n\n"
-            "输出要求：\n"
-            "- 只聚焦本标签相关的问题；无关内容忽略。\n"
-            "- 最终输出必须符合 TagCRLLMResult 结构化模式，所有文字使用中文。\n"
-            "- 在给出结构化输出前，如有必要可多次调用工具以收集信息。"
+            f"你是一名资深代码审查专家（专精领域：[{tag}]：{desc}），你的目标是**高检出率（Recall 优先）**地发现与该领域相关、且违反团队既有规范的改动。\n"
+            "你的工作模式：**Rule-first** —— 以输入的 standards（规则清单与摘要）为唯一主要依据；仅在必要时通过工具读取对应 Markdown 规则原文来核实细节。\n"
+            "\n"
+            "审查输入：\n"
+            "- 一个文件的 diff/代码上下文\n"
+            "- 一组与该标签相关的 standards（含 rule_id、规则摘要、可能包含 doc_path）\n"
+            "\n"
+            "可用工具（仅用于查证规则原文或补充必要上下文）：\n"
+            f"{tool_lines}\n"
+            "\n"
+            "关键原则（务必遵守）：\n"
+            "1) **只审查与[{tag}]相关的问题**；与本领域无关的内容一律忽略。\n"
+            "2) **以规范为准**：\n"
+            "   - 你提出的每一条 issue，必须能对应到 standards 中的某条规则；如规则摘要不足以支撑结论，先调用 code_standard_doc(rule_id) 阅读原文再下结论。\n"
+            "   - 若确实找不到对应规则，则默认不输出该问题。\n"
+            "3) **对“建议性意见”强约束**：\n"
+            "   - 对于**未在规范中明确要求**的改进点（如个人偏好、风格争议、可选重构），不要提出。\n"
+            "   - 仅当满足以下任一条件时，才允许输出“非规范但应提示”的问题，并在 issue 中明确标注为 \"advisory\"：\n"
+            "     a) 可能导致严重故障/数据丢失/安全漏洞/权限绕过/并发死锁等高风险；或\n"
+            "     b) 属于工程领域普遍共识的硬性问题（例如明显的注入、明文凭据、竞态导致的崩溃、panic/exception 未处理导致服务不可用）。\n"
+            "4) **Recall 优先策略**：\n"
+            "   - 对任何“疑似违反规则”的点，先倾向于收集证据（必要时读规则原文），不要因为不确定就跳过。\n"
+            "   - 但不要编造规则或臆测需求；不确定且无规则支撑时，不输出。\n"
+            "5) **证据驱动**：每条 issue 必须包含可定位的证据（具体代码片段/行号范围/函数名/变更段），并解释为何违反规则。\n"
+            "\n"
+            "执行步骤（建议遵循，但不必输出你的思考过程）：\n"
+            "A. 快速浏览 diff，列出所有可能与[{tag}]相关的风险点（宁可多列候选）。\n"
+            "B. 将候选点逐一映射到 standards 的 rule_id；若摘要不足以判断，调用 code_standard_doc(rule_id) 查证。\n"
+            "C. 对每个确认问题输出一条结构化 issue：\n"
+            "   - type: \"violation\"（规范违规）或 \"advisory\"（仅限严重/共识问题）\n"
+            "   - rule_ids: [对应规则]；若为 advisory 且无规则支撑，rule_ids 必须是 []\n"
+            "   - severity: 按规范或你的风险判断（advisory 必须说明风险）\n"
+            "   - evidence: 可定位的代码证据\n"
+            "   - explanation: 简洁说明违反点与影响\n"
+            "   - fix: 给出最小化、可执行的修复建议（不要大重构）\n"
+            "\n"
+            "输出要求（必须严格满足）：\n"
+            "- 最终只输出一次，且必须符合 TagCRLLMResult 结构化模式。\n"
+            "- 所有文字使用中文。\n"
+            "- issue.rule_ids 必须准确列出对应 rule_id；若未引用任何规范则输出 []。\n"
+            "- 在给出结构化输出前，如需要可多次调用工具收集规则原文信息。\n"
         )
 
     def _build_tagger_chain(self):
@@ -206,6 +210,7 @@ class FileReviewEngine:
                 tools=tools,
                 response_format=TagCRLLMResult,
                 name=f"tag-{tag}",
+                rate_limiter=self.rate_limiter,
             )
         return agents
 
@@ -347,13 +352,30 @@ class FileReviewEngine:
             f"{payload_json}"
         )
         agent = self.tag_agents[tag]
-        async with self.rate_limiter:
-            agent_state = await agent.ainvoke({"messages": [{"role": "user", "content": user_message}]})
+        agent_state = await agent.ainvoke({"messages": [{"role": "user", "content": user_message}]})
 
         structured = agent_state.get("structured_response")
         if structured is None:
             raise ValueError(f"Tag agent for {tag} 未返回结构化结果")
-        return TagCRResult(file_path=self._file_path(file_diff), tag=tag, **structured.model_dump())
+        rule_ids = sorted(
+            {
+                rid
+                for issue in structured.issues
+                for rid in getattr(issue, "rule_ids", []) or []
+                if rid
+            }
+        )
+        return TagCRResult(
+            file_path=self._file_path(file_diff),
+            tag=tag,
+            summary=structured.summary,
+            overall_severity=structured.overall_severity,
+            approved=structured.approved,
+            issues=structured.issues,
+            needs_human_review=structured.needs_human_review,
+            rule_ids=rule_ids,
+            meta=structured.meta,
+        )
 
     def _merge_file_results(
         self,
@@ -368,6 +390,7 @@ class FileReviewEngine:
         needs_human_review = False
         approved = True
         per_tag_summary: List[str] = []
+        rule_ids_set: set[str] = set()
 
         for tr in tag_results:
             per_tag_summary.append(f"[{tr.tag}] {tr.summary}")
@@ -375,16 +398,22 @@ class FileReviewEngine:
             severities.append(tr.overall_severity)
             needs_human_review = needs_human_review or bool(tr.needs_human_review)
             approved = approved and bool(tr.approved)
+            for issue in tr.issues:
+                for rid in issue.rule_ids:
+                    if rid:
+                        rule_ids_set.add(rid)
 
         overall_severity = self._max_severity(severities) if severities else "info"
         approved = approved and (not needs_human_review)
         tags_str = ", ".join(tags) if tags else "无"
+        file_rule_ids = sorted(rule_ids_set)
 
         summary = "；".join(per_tag_summary) if per_tag_summary else f"标签={tags_str}：未发现需要专项审查的问题。"
         meta = {
             "tags": tags,
             "tagging_reasoning": tagging_reasoning,
             "per_tag": [tr.model_dump() for tr in tag_results],
+            "rule_ids": file_rule_ids,
         }
 
         return FileCRResult(
@@ -394,6 +423,7 @@ class FileReviewEngine:
             overall_severity=overall_severity,  # type: ignore[arg-type]
             approved=approved,
             issues=issues,
+            rule_ids=file_rule_ids,
             needs_human_review=needs_human_review,
             meta=meta,
         )

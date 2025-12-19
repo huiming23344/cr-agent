@@ -13,6 +13,8 @@ from langgraph.graph import END, START, StateGraph
 from cr_agent.config import load_openai_config
 from cr_agent.file_review import AsyncRateLimiter, FileReviewEngine
 from cr_agent.models import AgentState
+from cr_agent.rate_limiter import RateLimitedLLM
+from cr_agent.reporting import summarize_to_cli, write_markdown_report
 from cr_agent.profile import ProfileConfig, RepoProfile, load_profile
 from tools.git_tools import get_last_commit_diff
 
@@ -46,18 +48,13 @@ def _build_review_agent(file_reviewer: FileReviewEngine):
         tasks = [file_reviewer.review_file(fd) for fd in commit_diff.files]
         return {"file_cr_result": await asyncio.gather(*tasks)} if tasks else {"file_cr_result": []}
 
-    def print_resule(state: AgentState):
-        print(state["file_cr_result"])
-
     agent_builder = StateGraph(AgentState)
     agent_builder.add_node("get_last_commit_diff", get_last_commit_diff)
     agent_builder.add_node("review_all_files", review_all_files)
-    agent_builder.add_node("print_resule", print_resule)
 
     agent_builder.add_edge(START, "get_last_commit_diff")
     agent_builder.add_edge("get_last_commit_diff", "review_all_files")
-    agent_builder.add_edge("review_all_files", "print_resule")
-    agent_builder.add_edge("print_resule", END)
+    agent_builder.add_edge("review_all_files", END)
     return agent_builder.compile()
 
 
@@ -82,15 +79,6 @@ def main():
     blacklist_patterns = selected_repo.skip_regex if selected_repo else None
     blacklist_basenames = selected_repo.skip_basenames if selected_repo else None
 
-    model_config = load_openai_config(timeout=600)
-    llm = ChatOpenAI(
-        base_url=model_config.base_url,
-        api_key=model_config.api_key,
-        model=model_config.model_name,
-        temperature=model_config.temperature,
-        timeout=model_config.timeout,
-    )
-
     max_qps_value = os.getenv("CR_MAX_QPS")
     rate_limiter = None
     if max_qps_value:
@@ -100,6 +88,16 @@ def main():
                 rate_limiter = AsyncRateLimiter(max_qps)
         except ValueError as exc:
             raise ValueError(f"CR_MAX_QPS must be a number, got {max_qps_value}") from exc
+
+    model_config = load_openai_config(timeout=600)
+    llm_base = ChatOpenAI(
+        base_url=model_config.base_url,
+        api_key=model_config.api_key,
+        model=model_config.model_name,
+        temperature=model_config.temperature,
+        timeout=model_config.timeout,
+    )
+    llm = RateLimitedLLM(llm_base, rate_limiter) if rate_limiter else llm_base
 
     file_reviewer = FileReviewEngine(
         llm,
@@ -111,6 +109,17 @@ def main():
     review_agent = _build_review_agent(file_reviewer)
 
     result = asyncio.run(review_agent.ainvoke({"repo_path": repo_path, "file_cr_result": []}))
+
+    file_results = result.get("file_cr_result", [])
+    commit_diff = result.get("commit_diff")
+    report_dir_override = os.getenv("CR_REPORT_DIR")
+    report_path = write_markdown_report(
+        repo_path=repo_path,
+        commit_diff=commit_diff,
+        file_results=file_results,
+        custom_dir=report_dir_override,
+    )
+    summarize_to_cli(commit_diff=commit_diff, file_results=file_results, report_path=report_path)
     return result
 
 

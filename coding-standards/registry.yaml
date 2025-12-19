@@ -3,21 +3,13 @@ rules:
     title: "不要丢弃 error，必须处理或显式忽略"
     language: go
     severity: error
+    deprecated: false
     domains: [ERROR]
     path: "coding-standards/rules/go/GO-ERROR-002.md"
     prompt_hint: >
       对所有返回 error 的调用必须处理或显式忽略（_ = 并注明原因）。
       发现丢弃 error 时给出具体位置、影响、修复建议。
 
-  - id: GO-SEC-001
-    title: "敏感配置和凭证必须加密管理"
-    language: go
-    severity: warning
-    domains: [SEC, CONFIG]
-    path: "coding-standards/rules/go/GO-SEC-001.md"
-    prompt_hint: >
-      新增或修改的配置项不得明文存储敏感凭证，必须使用 KMS/环境变量注入；
-      请检查是否有日志打印密钥或将密钥写入版本库。
 
   - id: GO-STYLE-001
     title: "导出符号必须提供注释，保持可读性"
@@ -29,4 +21,13 @@ rules:
       检查新增/修改的导出类型、函数、常量和接口是否带有 Go 风格注释（以名称开头）。
       确保注释解释用途、关键约束以及并发/性能注意事项，避免信息缺失。
 
-
+  - id: GO-API-001
+    title: "函数参数超过4个时必须使用结构体封装传参"
+    language: go
+    severity: warning
+    domains: [STYLE]
+    path: #待添加
+    prompt_hint: >
+      检查新增/修改的函数与方法签名：当参数数量大于4个时，必须将参数封装为结构体类型进行传递（可使用 Options/Params/Request 等命名）。
+      允许保留 context.Context 作为首参，其余业务参数总数仍不得超过4个；如超过则必须封装。
+      对于仅为避免改动而新增无意义参数的情况，应要求重构为结构体并保证字段命名清晰、可选字段使用指针或零值策略明确，并在注释中说明关键约束与默认行为。

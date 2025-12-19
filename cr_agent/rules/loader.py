@@ -23,6 +23,7 @@ class RuleMeta:
     severity: Optional[str] = None
     domains: Tuple[str, ...] = tuple()
     prompt_hint: Optional[str] = None
+    deprecated: bool = False
     doc_path: Optional[Path] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -67,6 +68,8 @@ def load_rules_index(*, registry_path: Path) -> RuleIndex:
 def _aggregate_by_language(rules_index: RuleIndex) -> Dict[str, List[RuleMeta]]:
     grouped: Dict[str, List[RuleMeta]] = defaultdict(list)
     for meta in sorted(rules_index.values(), key=lambda m: (m.language or "", m.rule_id)):
+        if meta.deprecated:
+            continue
         if not meta.language:
             continue
         grouped[meta.language].append(meta)
@@ -76,6 +79,8 @@ def _aggregate_by_language(rules_index: RuleIndex) -> Dict[str, List[RuleMeta]]:
 def _aggregate_by_domain(rules_index: RuleIndex) -> Dict[str, List[RuleMeta]]:
     grouped: Dict[str, List[RuleMeta]] = defaultdict(list)
     for meta in sorted(rules_index.values(), key=lambda m: m.rule_id):
+        if meta.deprecated:
+            continue
         for domain in meta.domains:
             grouped[domain].append(meta)
     return {domain: grouped[domain] for domain in sorted(grouped)}
@@ -84,6 +89,8 @@ def _aggregate_by_domain(rules_index: RuleIndex) -> Dict[str, List[RuleMeta]]:
 def _aggregate_by_language_domain(rules_index: RuleIndex) -> Dict[str, Dict[str, List[RuleMeta]]]:
     grouped: Dict[str, Dict[str, List[RuleMeta]]] = defaultdict(lambda: defaultdict(list))
     for meta in sorted(rules_index.values(), key=lambda m: (m.language or "", m.rule_id)):
+        if meta.deprecated:
+            continue
         if not meta.language:
             continue
         for domain in meta.domains:
@@ -134,6 +141,7 @@ def _parse_registry_rules(
         severity = str(item.get("severity")) if item.get("severity") is not None else None
         domains = _normalize_domains(item.get("domains"), fallback=item.get("domain"))
         prompt_hint = str(item.get("prompt_hint")) if item.get("prompt_hint") is not None else None
+        deprecated = bool(item.get("deprecated", False))
 
         doc_path = None
         path_value = item.get("path") or item.get("doc")
@@ -150,6 +158,7 @@ def _parse_registry_rules(
             severity=severity,
             domains=domains,
             prompt_hint=prompt_hint,
+            deprecated=deprecated,
             doc_path=doc_path,
             raw=dict(item),
         )

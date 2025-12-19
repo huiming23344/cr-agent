@@ -1,176 +1,189 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
-from cr_agent.models import CommitDiff, CRIssue, FileCRResult
-
-REPORTS_DIR_NAME = "cr_reports"
-
-
-def ensure_report_directory(repo_path: str | Path, custom_dir: Optional[str] = None) -> Path:
-    """Return the directory for persisted reports, creating it if needed."""
-    base = Path(custom_dir).expanduser() if custom_dir else Path(repo_path)
-    report_dir = base if custom_dir else base / REPORTS_DIR_NAME
-    report_dir.mkdir(parents=True, exist_ok=True)
-    return report_dir
+from cr_agent.models import CRIssue, CommitDiff, FileCRResult
+from cr_agent.rules import get_rules_catalog
 
 
-def _format_commit_headline(commit_diff: Optional[CommitDiff]) -> str:
-    if not commit_diff:
-        return "unknown"
-    short_sha = commit_diff.commit_sha[:7] if commit_diff.commit_sha else "unknown"
-    subject = (commit_diff.message or "").splitlines()[0].strip()
-    return f"{short_sha} - {subject}" if subject else short_sha
-
-
-def _collect_rule_issues(file_results: Sequence[FileCRResult]) -> List[Tuple[FileCRResult, CRIssue]]:
-    collected: List[Tuple[FileCRResult, CRIssue]] = []
-    for file_result in file_results:
-        for issue in file_result.issues:
-            if any(rule_id for rule_id in issue.rule_ids):
-                collected.append((file_result, issue))
-    return collected
-
-
-def summarize_to_cli(*, commit_diff: Optional[CommitDiff], file_results: Sequence[FileCRResult], report_path: Path) -> None:
-    """Print a concise CLI overview of the current review run."""
-    total_files = len(file_results)
-    total_issues = sum(len(fr.issues) for fr in file_results)
-    rule_issues = sum(1 for fr in file_results for issue in fr.issues if any(issue.rule_ids))
-    changed_files = len(commit_diff.files) if commit_diff else total_files
-    commit_line = _format_commit_headline(commit_diff)
-    message = (commit_diff.message or "").strip() if commit_diff else ""
-    lead = message.splitlines()[0] if message else "No commit message."
-
-    interesting_files = [fr.file_path for fr in file_results if fr.issues][:3]
-    focus_hint = ", ".join(interesting_files) if interesting_files else "无突出问题文件"
-
-    print("=== 代码变更 CR 概览 ===")
-    print(f"提交：{commit_line}")
-    print(f"主要内容：{lead}")
-    print(f"涉及文件：{changed_files} 个（审查 {total_files} 个文件）")
-    print(f"发现问题：{total_issues} 条，其中带 rule_id 的 {rule_issues} 条")
-    print(f"重点关注文件：{focus_hint}")
-    print(f"详细报告：{report_path}")
-
-
-def _format_file_issues(file_result: FileCRResult) -> List[str]:
-    lines: List[str] = []
-    if not file_result.issues:
-        lines.append("无问题。")
-        return lines
-
-    header = "| Severity | Category | Message | Rule IDs | Location | Suggestion |"
-    separator = "| --- | --- | --- | --- | --- | --- |"
-    lines.extend([header, separator])
-
-    for issue in file_result.issues:
-        rule_text = ", ".join(issue.rule_ids) if issue.rule_ids else "-"
-        location = "-"
-        if issue.line_start:
-            end = f"-{issue.line_end}" if issue.line_end and issue.line_end != issue.line_start else ""
-            location = f"L{issue.line_start}{end}"
-        suggestion = issue.suggestion.replace("\n", " ") if issue.suggestion else "-"
-        message = issue.message.replace("\n", " ")
-        lines.append(f"| {issue.severity} | {issue.category} | {message} | {rule_text} | {location} | {suggestion} |")
-    return lines
-
-
-def _format_rule_issue_section(rule_issues: Iterable[Tuple[FileCRResult, CRIssue]]) -> List[str]:
-    lines: List[str] = []
-    issues = list(rule_issues)
-    if not issues:
-        lines.append("无带 rule_id 的问题。")
-        return lines
-
-    header = "| File | Severity | Rule IDs | Message | Lines |"
-    separator = "| --- | --- | --- | --- | --- |"
-    lines.extend([header, separator])
-
-    for file_result, issue in issues:
-        rule_text = ", ".join(issue.rule_ids)
-        message = issue.message.replace("\n", " ")
-        if issue.line_start:
-            end = f"-{issue.line_end}" if issue.line_end and issue.line_end != issue.line_start else ""
-            lines_str = f"L{issue.line_start}{end}"
-        else:
-            lines_str = "-"
-        lines.append(f"| `{file_result.file_path}` | {issue.severity} | {rule_text} | {message} | {lines_str} |")
-    return lines
-
-
-def build_markdown_report(
+def render_markdown_report(
     *,
     repo_path: str,
-    commit_diff: Optional[CommitDiff],
-    file_results: Sequence[FileCRResult],
+    commit_diff: CommitDiff,
+    file_results: Iterable[FileCRResult],
 ) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    commit_label = _format_commit_headline(commit_diff)
-    total_files = len(file_results)
-    total_issues = sum(len(fr.issues) for fr in file_results)
-    rule_issue_entries = _collect_rule_issues(file_results)
-    rule_issue_count = len(rule_issue_entries)
-    changed_files = len(commit_diff.files) if commit_diff else total_files
-    summary_line = (commit_diff.message or "").strip().splitlines()[0] if commit_diff and commit_diff.message else "No commit message."
-
-    lines: List[str] = [
-        f"# Code Review Report",
-        "",
-        f"- 生成时间：{now}",
-        f"- 仓库：`{repo_path}`",
-        f"- 提交：{commit_label}",
-        f"- 主要内容：{summary_line}",
-        f"- 涉及文件：{changed_files} 个（审查 {total_files} 个文件）",
-        f"- 问题总数：{total_issues}（其中带 rule_id 的 {rule_issue_count}）",
-        "",
-        "## 文件级结论",
-    ]
-
-    for file_result in file_results:
-        tags = ", ".join(file_result.meta.get("tags", [])) if isinstance(file_result.meta, dict) else ""
-        tag_text = f"标签：{tags}" if tags else "标签：无"
-        rule_text = ", ".join(file_result.rule_ids) if file_result.rule_ids else "无"
-        lines.extend(
-            [
-                f"### `{file_result.file_path}`",
-                f"- change_type: {file_result.change_type}",
-                f"- overall_severity: {file_result.overall_severity}",
-                f"- approved: {file_result.approved}",
-                f"- rule_ids: {rule_text}",
-                f"- {tag_text}",
-                f"- summary: {file_result.summary}",
-                "",
-            ]
-        )
-        lines.extend(_format_file_issues(file_result))
-        lines.append("")
-
-    lines.extend(
-        [
-            "## 带 rule_id 的问题汇总",
-            "",
-        ]
-    )
-    lines.extend(_format_rule_issue_section(rule_issue_entries))
-    lines.append("")
-    return "\n".join(lines)
+    renderer = _MarkdownReportRenderer(repo_path=Path(repo_path), commit_diff=commit_diff)
+    return renderer.render(list(file_results))
 
 
 def write_markdown_report(
     *,
     repo_path: str,
-    commit_diff: Optional[CommitDiff],
-    file_results: Sequence[FileCRResult],
+    commit_diff: CommitDiff,
+    file_results: Iterable[FileCRResult],
     custom_dir: Optional[str] = None,
+    report_text: Optional[str] = None,
 ) -> Path:
-    report_dir = ensure_report_directory(repo_path, custom_dir=custom_dir)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    commit_part = commit_diff.commit_sha[:7] if commit_diff and commit_diff.commit_sha else "no-commit"
-    filename = f"cr-report-{timestamp}-{commit_part}.md"
-    content = build_markdown_report(repo_path=repo_path, commit_diff=commit_diff, file_results=file_results)
-    report_path = report_dir / filename
-    report_path.write_text(content, encoding="utf-8")
+    report_md = report_text or render_markdown_report(repo_path=repo_path, commit_diff=commit_diff, file_results=file_results)
+    target_dir = Path(custom_dir).expanduser().resolve() if custom_dir else Path(repo_path)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    report_path = target_dir / "code_review_report.md"
+    report_path.write_text(report_md, encoding="utf-8")
     return report_path
+
+
+def summarize_to_cli(*, commit_diff: CommitDiff, file_results: Iterable[FileCRResult], report_path: Optional[Path] = None) -> None:
+    files_count = len(list(file_results))
+    title = (commit_diff.message or "").strip().splitlines()[0] if commit_diff else ""
+    print(f"[CR] {title or '变更'} | 文件 {files_count} | 报告: {report_path or '未写入'}")
+
+
+@dataclass
+class _MarkdownReportRenderer:
+    repo_path: Path
+    commit_diff: CommitDiff
+    _file_cache: Dict[str, Optional[List[str]]] = field(default_factory=dict)
+
+    def render(self, results: List[FileCRResult]) -> str:
+        overview = self._render_overview(results)
+        rule_issues_md, general_issues_md = self._render_issues(results)
+
+        parts = [
+            "# Code Review Report",
+            "## 概述",
+            overview,
+            "## Rule Issues",
+            rule_issues_md or "_无带 rule_id 的问题。_",
+            "## General Issues",
+            general_issues_md or "_无未关联 rule 的问题。_",
+        ]
+        return "\n\n".join(part for part in parts if part is not None)
+
+    def _render_overview(self, results: List[FileCRResult]) -> str:
+        files_count = len(results)
+        approvals = sum(1 for r in results if r.approved)
+        needs_review = sum(1 for r in results if r.needs_human_review)
+        commit_title = (self.commit_diff.message or "").strip().splitlines()[0] if self.commit_diff else ""
+
+        lines = [
+            f"- 变更摘要：{commit_title or '（无提交信息）'}",
+            f"- 文件数：{files_count}（通过 {approvals}，需人工 {needs_review}）",
+        ]
+        return "\n".join(lines)
+
+    def _render_issues(self, results: List[FileCRResult]) -> Tuple[str, str]:
+        with_rule: List[str] = []
+        general: List[str] = []
+
+        for fr in results:
+            for issue in fr.issues:
+                rule_id = self._extract_rule_id(issue, fr)
+                block = self._render_issue_block(issue, fr, rule_id=rule_id)
+                if rule_id:
+                    with_rule.append(block)
+                else:
+                    general.append(block)
+
+        return "\n\n".join(with_rule), "\n\n".join(general)
+
+    def _extract_rule_id(self, issue: CRIssue, file_result: FileCRResult) -> Optional[str]:
+        extras = getattr(issue, "model_extra", {}) or {}
+        if "rule_id" in extras:
+            value = extras["rule_id"]
+            if value:
+                return str(value)
+
+        per_tag = file_result.meta.get("per_tag") or []
+        for entry in per_tag:
+            if isinstance(entry, dict) and "meta" in entry and isinstance(entry["meta"], dict):
+                rid = entry["meta"].get("rule_id")
+                if rid:
+                    return str(rid)
+        return None
+
+    def _render_issue_block(self, issue: CRIssue, fr: FileCRResult, *, rule_id: Optional[str]) -> str:
+        path_line = self._format_path(issue, fr)
+        rule_title = self._lookup_rule_title(rule_id)
+        rule_hint = self._lookup_rule_hint(rule_id)
+        header = f"### [{rule_id}] {rule_title}" if rule_id else f"### {path_line}"
+
+        lines = [header]
+        lines.append(f"- 说明：{issue.message}")
+        if issue.suggestion:
+            lines.append(f"- 建议：{issue.suggestion}")
+        if rule_id:
+            lines.append(f"- 规则说明：{rule_hint}")
+        if path_line:
+            lines.append(f"- 位置：{path_line}")
+        lines.append(f"- 严重级别：{issue.severity}")
+
+        code_block = self._render_code_context(issue, fr)
+        if code_block:
+            lines.append("```")
+            lines.append(code_block)
+            lines.append("```")
+
+        return "\n".join(lines)
+
+    def _format_path(self, issue: CRIssue, fr: FileCRResult) -> str:
+        path = issue.file_path or fr.file_path or "<unknown>"
+        if issue.line_start and issue.line_end:
+            return f"{path}:{issue.line_start}-{issue.line_end}"
+        if issue.line_start:
+            return f"{path}:{issue.line_start}"
+        return path
+
+    def _render_code_context(self, issue: CRIssue, fr: FileCRResult) -> Optional[str]:
+        path = issue.file_path or fr.file_path
+        if not path:
+            return None
+
+        line_start = issue.line_start or 1
+        line_end = issue.line_end or line_start
+
+        lines = self._load_file_lines(path)
+        if lines:
+            start = max(1, line_start - 3)
+            end = min(len(lines), line_end + 3)
+            snippet = lines[start - 1 : end]
+            numbered = [f"{start + idx:>4} {text.rstrip()}" for idx, text in enumerate(snippet)]
+            return "\n".join(numbered)
+
+        return f"{path}:{line_start}-{line_end}"
+
+    def _load_file_lines(self, path: str) -> Optional[List[str]]:
+        if path in self._file_cache:
+            return self._file_cache[path]
+        full_path = self.repo_path / path
+        try:
+            content = full_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            content = None
+        self._file_cache[path] = content
+        return content
+
+    @staticmethod
+    def _lookup_rule_title(rule_id: Optional[str]) -> str:
+        if not rule_id:
+            return "未关联规则"
+        try:
+            meta = get_rules_catalog().by_id.get(rule_id)
+        except Exception:
+            meta = None
+        return meta.title if meta and meta.title else rule_id
+
+    @staticmethod
+    def _lookup_rule_hint(rule_id: Optional[str]) -> str:
+        if not rule_id:
+            return "无规则说明"
+        try:
+            meta = get_rules_catalog().by_id.get(rule_id)
+        except Exception:
+            meta = None
+        if meta:
+            parts = [meta.prompt_hint or "", meta.raw.get("description", "")]
+            text = "；".join(p.strip() for p in parts if p and str(p).strip())
+            return text or "无规则说明"
+        return "无规则说明"

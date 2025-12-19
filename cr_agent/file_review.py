@@ -481,12 +481,12 @@ class FileReviewEngine:
 
         if language:
             by_lang_domain = catalog.by_language_domain.get(language, {})
-            rules = by_lang_domain.get(tag, [])
+            rules = [rule for rule in by_lang_domain.get(tag, []) if not rule.deprecated]
             if rules:
-                return list(rules)
+                return rules
 
         # Fallback to cross-language domain list
-        return list(catalog.by_domain.get(tag, []))
+        return [rule for rule in catalog.by_domain.get(tag, []) if not rule.deprecated]
 
     @staticmethod
     def _format_rules_for_prompt(rules: List[RuleMeta]) -> str:

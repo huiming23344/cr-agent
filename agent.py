@@ -14,7 +14,7 @@ from cr_agent.config import load_openai_config
 from cr_agent.file_review import AsyncRateLimiter, FileReviewEngine
 from cr_agent.models import AgentState
 from cr_agent.rate_limiter import RateLimitedLLM
-from cr_agent.reporting import summarize_to_cli, write_markdown_report
+from cr_agent.reporting import render_markdown_report, summarize_to_cli, write_markdown_report
 from cr_agent.profile import ProfileConfig, RepoProfile, load_profile
 from tools.git_tools import get_last_commit_diff
 
@@ -48,13 +48,24 @@ def _build_review_agent(file_reviewer: FileReviewEngine):
         tasks = [file_reviewer.review_file(fd) for fd in commit_diff.files]
         return {"file_cr_result": await asyncio.gather(*tasks)} if tasks else {"file_cr_result": []}
 
+    def render_report(state: AgentState):
+        return {
+            "report_markdown": render_markdown_report(
+                repo_path=state["repo_path"],
+                commit_diff=state["commit_diff"],
+                file_results=state.get("file_cr_result", []),
+            )
+        }
+
     agent_builder = StateGraph(AgentState)
     agent_builder.add_node("get_last_commit_diff", get_last_commit_diff)
     agent_builder.add_node("review_all_files", review_all_files)
+    agent_builder.add_node("render_report", render_report)
 
     agent_builder.add_edge(START, "get_last_commit_diff")
     agent_builder.add_edge("get_last_commit_diff", "review_all_files")
-    agent_builder.add_edge("review_all_files", END)
+    agent_builder.add_edge("review_all_files", "render_report")
+    agent_builder.add_edge("render_report", END)
     return agent_builder.compile()
 
 
@@ -112,12 +123,18 @@ def main():
 
     file_results = result.get("file_cr_result", [])
     commit_diff = result.get("commit_diff")
+    report_text = result.get("report_markdown") or render_markdown_report(
+        repo_path=repo_path,
+        commit_diff=commit_diff,
+        file_results=file_results,
+    )
     report_dir_override = os.getenv("CR_REPORT_DIR")
     report_path = write_markdown_report(
         repo_path=repo_path,
         commit_diff=commit_diff,
         file_results=file_results,
         custom_dir=report_dir_override,
+        report_text=report_text,
     )
     summarize_to_cli(commit_diff=commit_diff, file_results=file_results, report_path=report_path)
     return result

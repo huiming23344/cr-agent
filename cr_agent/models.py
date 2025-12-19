@@ -148,3 +148,4 @@ class AgentState(TypedDict):
     repo_path: str
     commit_diff: CommitDiff
     file_cr_result: List[FileCRResult]
+    report_markdown: str

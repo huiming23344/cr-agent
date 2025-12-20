@@ -1,0 +1,8 @@
+version: 1
+repos:
+  - name: eval-default
+    priority: 10
+    match_paths: [".*"]
+    domains: ["STYLE", "ERROR", "API", "CONC", "PERF", "SEC", "TEST", "CONFIG"]
+default:
+  domains: ["STYLE", "ERROR", "API", "CONC", "PERF", "SEC", "TEST", "CONFIG"]

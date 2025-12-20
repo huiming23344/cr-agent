@@ -1,0 +1,6 @@
+rule_id: GO-STYLE-001
+domain: STYLE
+language: go
+expect_hit: true
+expect_count: 1
+allow_other_rules: true

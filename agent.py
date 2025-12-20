@@ -14,7 +14,7 @@ from cr_agent.config import load_openai_config
 from cr_agent.file_review import AsyncRateLimiter, FileReviewEngine
 from cr_agent.models import AgentState
 from cr_agent.rate_limiter import RateLimitedLLM
-from cr_agent.reporting import render_markdown_report, summarize_to_cli, write_markdown_report
+from cr_agent.reporting import render_markdown_report, render_ndjson_report, summarize_to_cli, write_markdown_report
 from cr_agent.profile import ProfileConfig, RepoProfile, load_profile
 from tools.git_tools import get_last_commit_diff
 
@@ -128,15 +128,31 @@ def main():
         commit_diff=commit_diff,
         file_results=file_results,
     )
+    eval_mode = os.getenv("CR_EVAL_MODE")
+    ndjson_text = None
+    if eval_mode:
+        ndjson_text = render_ndjson_report(
+            repo_path=repo_path,
+            commit_diff=commit_diff,
+            file_results=file_results,
+        )
+
+    short_sha = (commit_diff.commit_sha[:7] if commit_diff and commit_diff.commit_sha else "latest")
+    base_name = f"cr_report_{short_sha}.md"
     report_dir_override = os.getenv("CR_REPORT_DIR")
-    report_path = write_markdown_report(
+    report_path, ndjson_path = write_markdown_report(
         repo_path=repo_path,
         commit_diff=commit_diff,
         file_results=file_results,
         custom_dir=report_dir_override,
         report_text=report_text,
+        ndjson_text=ndjson_text,
+        file_name=base_name,
     )
+
     summarize_to_cli(commit_diff=commit_diff, file_results=file_results, report_path=report_path)
+    if ndjson_path:
+        print(f"[CR] NDJSON: {ndjson_path}")
     return result
 
 

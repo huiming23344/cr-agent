@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -18,6 +19,17 @@ def render_markdown_report(
     return renderer.render(list(file_results))
 
 
+def render_ndjson_report(
+    *,
+    repo_path: str,
+    commit_diff: CommitDiff,
+    file_results: Iterable[FileCRResult],
+) -> str:
+    renderer = _MarkdownReportRenderer(repo_path=Path(repo_path), commit_diff=commit_diff)
+    records = renderer.iter_issue_records(list(file_results))
+    return "\n".join(json.dumps(record, ensure_ascii=False) for record in records)
+
+
 def write_markdown_report(
     *,
     repo_path: str,
@@ -25,13 +37,24 @@ def write_markdown_report(
     file_results: Iterable[FileCRResult],
     custom_dir: Optional[str] = None,
     report_text: Optional[str] = None,
-) -> Path:
+    ndjson_text: Optional[str] = None,
+    file_name: Optional[str] = None,
+) -> Tuple[Path, Optional[Path]]:
     report_md = report_text or render_markdown_report(repo_path=repo_path, commit_diff=commit_diff, file_results=file_results)
     target_dir = Path(custom_dir).expanduser().resolve() if custom_dir else Path(repo_path)
     target_dir.mkdir(parents=True, exist_ok=True)
-    report_path = target_dir / "code_review_report.md"
+
+    base_name = file_name or "code_review_report.md"
+    report_path = target_dir / base_name
     report_path.write_text(report_md, encoding="utf-8")
-    return report_path
+
+    ndjson_path: Optional[Path] = None
+    if ndjson_text is not None:
+        ndjson_name = Path(base_name).with_suffix(".ndjson").name
+        ndjson_path = target_dir / ndjson_name
+        ndjson_path.write_text(ndjson_text, encoding="utf-8")
+
+    return report_path, ndjson_path
 
 
 def summarize_to_cli(*, commit_diff: CommitDiff, file_results: Iterable[FileCRResult], report_path: Optional[Path] = None) -> None:
@@ -87,6 +110,23 @@ class _MarkdownReportRenderer:
                     general.append(block)
 
         return "\n\n".join(with_rule), "\n\n".join(general)
+
+    def iter_issue_records(self, results: List[FileCRResult]) -> Iterable[Dict[str, object]]:
+        for fr in results:
+            for issue in fr.issues:
+                rule_id = self._extract_rule_id(issue, fr)
+                path_line = self._format_path(issue, fr)
+                yield {
+                    "rule_id": rule_id,
+                    "file": issue.file_path or fr.file_path,
+                    "line_start": issue.line_start,
+                    "line_end": issue.line_end,
+                    "hit": bool(rule_id),
+                    "severity": issue.severity,
+                    "message": issue.message,
+                    "path_line": path_line,
+                    "approved": fr.approved,
+                }
 
     def _extract_rule_id(self, issue: CRIssue, file_result: FileCRResult) -> Optional[str]:
         extras = getattr(issue, "model_extra", {}) or {}

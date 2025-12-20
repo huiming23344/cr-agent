@@ -1,0 +1,13 @@
+diff --git a/pkg/foo/service.go b/pkg/foo/service.go
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/pkg/foo/service.go
+@@ -0,0 +1,7 @@
++package foo
++
++import "context"
++
++func DoWork(ctx context.Context) error {
++	return nil
++}

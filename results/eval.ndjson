@@ -1,0 +1,1 @@
+{"case": "missing_export_comment", "rule_id": "GO-STYLE-001", "expect_hit": true, "actual_hit": false, "expected_count": 1, "actual_count": 0, "allow_other_rules": true}

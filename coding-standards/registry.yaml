@@ -10,18 +10,7 @@ rules:
       对所有返回 error 的调用必须处理或显式忽略（_ = 并注明原因）。
       发现丢弃 error 时给出具体位置、影响、修复建议。
 
-
   - id: GO-STYLE-001
-    title: "导出符号必须提供注释，保持可读性"
-    language: go
-    severity: info
-    domains: [STYLE]
-    path: "coding-standards/rules/go/GO-STYLE-001.md"
-    prompt_hint: >
-      检查新增/修改的导出类型、函数、常量和接口是否带有 Go 风格注释（以名称开头）。
-      确保注释解释用途、关键约束以及并发/性能注意事项，避免信息缺失。
-
-  - id: GO-API-001
     title: "函数参数超过4个时必须使用结构体封装传参"
     language: go
     severity: warning
